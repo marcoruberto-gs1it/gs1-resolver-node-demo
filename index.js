@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const gs1encoder = require('gs1encoder'); // Utilizzato internamente per futuri parsing di IA
+const gs1encoder = require('gs1encoder'); 
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -8,12 +8,10 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 
 // ============================================================================
-// DATI STATICI DEL PRODOTTO (MOCK COMPLIANT CON LO STANDARD)
-// Basato su GTIN: 08005360007746, Lotto: LOTTO123, Scadenza: 261031
+// DATI STATICI DEL PRODOTTO (GS1 RESOLVER COMPLIANT)
 // ============================================================================
 const TARGET_GTIN = "08005360007746";
 
-// Struttura Linkset ufficiale (RFC 9264 / GS1 Resolver Standard)
 const linksetResponse = {
     "linkset": [
         {
@@ -45,7 +43,6 @@ const linksetResponse = {
     ]
 };
 
-// Struttura JSON-LD nativa del Resolver (GS1 Web Vocabulary)
 const jsonldResponse = {
     "@context": [
         "https://gs1.github.io/GS1WebVocab/gs1.jsonld",
@@ -64,51 +61,66 @@ const jsonldResponse = {
 // LOGICA DI ROUTING E CONTENT NEGOTIATION GS1
 // ============================================================================
 app.get('/01/:gtin/10/:lot', (req, res) => {
-    const { gtin, lot } = req.params;
+  const { gtin, lot } = req.params;
+  const linkTypeRequested = req.query.linkType; 
 
-    // 1. Controllo di corrispondenza del GTIN di test
-    if (gtin !== TARGET_GTIN) {
-        return res.status(404).json({ error: "GS1 Identifiers not found on this resolver." });
-    }
+  // 1. Validazione preliminare del GTIN
+  if (gtin !== TARGET_GTIN) {
+      return res.status(404).json({ error: "GS1 Identifiers not found on this resolver." });
+  }
 
-    // 2. Intercettazione Query Parameters
-    const linkTypeRequested = req.query.linkType; // es. gs1:recipeInfo o la versione estesa
+  const rawAccept = req.headers['accept'] || '';
 
-    // 3. PRIORITÀ 1: Richiesta esplicita di LINKSET (application/linkset+json)
-    if (req.accepts('application/linkset+json')) {
-        res.set('Content-Type', 'application/linkset+json');
-        return res.status(200).json(linksetResponse);
-    }
+  // ------------------------------------------------------------------------
+  // MDEIA TYPE PRIORITIZATION (Risolve il problema del browser)
+  // ------------------------------------------------------------------------
+  
+  // Se l'utente sta navigando da Browser (ha "text/html" nell'header o usa una query string comune)
+  // Forziamo il REDIRECT (Caso 3) prima di qualsiasi valutazione API dati.
+  if (rawAccept.includes('text/html') || req.accepts('html') || rawAccept === '*/*' || !rawAccept) {
+      
+      let targetVocabKey = "https://ref.gs1.org/voc/pip"; // Fallback standard (Product Information Page)
 
-    // 4. PRIORITÀ 2: Richiesta dati strutturati JSON-LD (application/ld+json)
-    if (req.accepts('application/ld+json')) {
-        res.set('Content-Type', 'application/ld+json');
-        return res.status(200).json(jsonldResponse);
-    }
+      // Parsing del linkType
+      if (linkTypeRequested) {
+          if (linkTypeRequested.includes('recipeInfo') || linkTypeRequested === 'gs1:recipeInfo') {
+              targetVocabKey = "https://ref.gs1.org/voc/recipeInfo";
+          } else if (linkTypeRequested.includes('pip') || linkTypeRequested === 'gs1:pip') {
+              targetVocabKey = "https://ref.gs1.org/voc/pip";
+          }
+      }
 
-    // 5. PRIORITÀ 3: Richiesta Web Standard (HTML) o qualsiasi altro client (Browser/Smartphone) -> REDIRECT
-    // Gestione dell'attributo short-name o full-URI per il linkType
-    let targetVocabKey = "https://ref.gs1.org/voc/pip"; // default fallback
+      // Estrazione URL
+      const linksFound = linksetResponse.linkset[0][targetVocabKey] || linksetResponse.linkset[0]["https://ref.gs1.org/voc/defaultLink"];
+      const targetUrl = linksFound[0].href;
 
-    if (linkTypeRequested) {
-        if (linkTypeRequested.includes('recipeInfo') || linkTypeRequested === 'gs1:recipeInfo') {
-            targetVocabKey = "https://ref.gs1.org/voc/recipeInfo";
-        } else if (linkTypeRequested.includes('pip') || linkTypeRequested === 'gs1:pip') {
-            targetVocabKey = "https://ref.gs1.org/voc/pip";
-        }
-    }
+      // Header standard GS1 e Redirect Temporaneo 307
+      res.set('Link', `<${targetUrl}>; rel="${targetVocabKey}"`);
+      return res.redirect(307, targetUrl);
+  }
 
-    // Estraiamo il link corrispondente dal linkset
-    const linksFound = linksetResponse.linkset[0][targetVocabKey] || linksetResponse.linkset[0]["https://ref.gs1.org/voc/defaultLink"];
-    const targetUrl = linksFound[0].href;
+  // SE NON È UN BROWSER (Richieste API pure, cURL, App di scansione B2B)
+  
+  // CASO 1: Richiesta esplicita del Linkset
+  if (rawAccept.includes('application/linkset+json')) {
+      res.set('Content-Type', 'application/linkset+json');
+      return res.status(200).json(linksetResponse);
+  }
 
-    // Come da standard GS1 1.2.0, usiamo HTTP 307 (Temporary Redirect)
-    // valorizzando l'header 'Link' per la tracciabilità del tipo di relazione ed il Linkset correlato
-    res.set('Link', `<${targetUrl}>; rel="${targetVocabKey}"`);
-    return res.redirect(307, targetUrl);
+  // CASO 2: Richiesta esplicita di dati strutturati JSON-LD
+  if (rawAccept.includes('application/ld+json')) {
+      res.set('Content-Type', 'application/ld+json');
+      return res.status(200).json(jsonldResponse);
+  }
+
+  // Fallback se nessun header corrisponde
+  return res.status(406).send('Not Acceptable - Formato non supportato dal Resolver GS1');
 });
 
-// Avvio del Server
+app.get('/', (req, res) => {
+    res.send('GS1 Conformant Resolver PoC attivo. Naviga su un URI di un prodotto per testarlo.');
+});
+
 app.listen(port, () => {
-    console.log(`🚀 GS1 Conformant Resolver attivo sulla porta ${port}`);
+    console.log(`🚀 GS1 Conformant Resolver online sulla porta ${port}`);
 });
