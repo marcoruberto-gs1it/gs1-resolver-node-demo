@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const gs1encoder = require('gs1encoder'); // Il pacchetto NPM funzionante!
+const gs1encoder = require('gs1encoder'); // Utilizzato internamente per futuri parsing di IA
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -8,86 +8,107 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 
 // ============================================================================
-// DATABASE STATICO (Mock per il Proof of Concept)
-// Dati: /01/08005360007746/10/LOTTO123?17=261031
+// DATI STATICI DEL PRODOTTO (MOCK COMPLIANT CON LO STANDARD)
+// Basato su GTIN: 08005360007746, Lotto: LOTTO123, Scadenza: 261031
 // ============================================================================
-const prodottoMock = {
-    gtin: "08005360007746",
-    links: {
-        // Product Information Page (Default / Fallback)
-        "gs1:pip": "https://marcoruberto-gs1it.github.io/demo-gs1-italy-digital-link-web-vocabulary/01/08005360007746/10/LOTTO123?17=261031",
-        // Tracciabilità
-        "gs1:traceability": "https://example.com/tracciabilita/08005360007746",
-        // Informazioni Nutrizionali / Ricette
-        "gs1:recipeInfo": "https://example.com/ricette/08005360007746"
-    },
-    jsonld: {
-        "@context": [
-            "https://gs1.github.io/GS1WebVocab/gs1.jsonld",
-            { "@vocab": "https://gs1.org/vocab/" }
-        ],
-        "@id": "https://id.gs1.org/01/08005360007746/10/LOTTO123",
-        "@type": "Product",
-        "gtin": "08005360007746",
-        "productName": "Prodotto Demo GS1 Italy",
-        "lotNumber": "LOTTO123",
-        "expirationDate": "2026-10-31", // Corrisponde all'AI 17=261031
-        "description": "Dati di prodotto esposti tramite Resolver Node.js conforme a GS1"
-    }
+const TARGET_GTIN = "08005360007746";
+
+// Struttura Linkset ufficiale (RFC 9264 / GS1 Resolver Standard)
+const linksetResponse = {
+    "linkset": [
+        {
+            "anchor": "https://id.gs1.org/01/08005360007746/10/LOTTO123?17=261031",
+            "description": "Prodotto Demo GS1 Italy - Pasta/Riso",
+            "https://ref.gs1.org/voc/pip": [
+                {
+                    "href": "https://marcoruberto-gs1it.github.io/demo-gs1-italy-digital-link-web-vocabulary/01/08005360007746/10/LOTTO123?17=261031",
+                    "title": "Product Information Page (Digital Link Demo)",
+                    "type": "text/html",
+                    "hreflang": ["it"]
+                }
+            ],
+            "https://ref.gs1.org/voc/recipeInfo": [
+                {
+                    "href": "https://example.com/ricette/08005360007746",
+                    "title": "Ricette Consigliate",
+                    "type": "text/html",
+                    "hreflang": ["it"]
+                }
+            ],
+            "https://ref.gs1.org/voc/defaultLink": [
+                {
+                    "href": "https://marcoruberto-gs1it.github.io/demo-gs1-italy-digital-link-web-vocabulary/01/08005360007746/10/LOTTO123?17=261031",
+                    "title": "Default Link"
+                }
+            ]
+        }
+    ]
+};
+
+// Struttura JSON-LD nativa del Resolver (GS1 Web Vocabulary)
+const jsonldResponse = {
+    "@context": [
+        "https://gs1.github.io/GS1WebVocab/gs1.jsonld",
+        { "@vocab": "https://gs1.org/vocab/" }
+    ],
+    "@id": "https://id.gs1.org/01/08005360007746/10/LOTTO123",
+    "@type": "Product",
+    "gtin": "08005360007746",
+    "productName": "Prodotto Demo GS1 Italy",
+    "lotNumber": "LOTTO123",
+    "expirationDate": "2026-10-31",
+    "comment": "Risposta in formato nativo GS1 JSON-LD"
 };
 
 // ============================================================================
-// LOGICA DEL RESOLVER (Rotta dinamica GS1 Digital Link)
+// LOGICA DI ROUTING E CONTENT NEGOTIATION GS1
 // ============================================================================
 app.get('/01/:gtin/10/:lot', (req, res) => {
     const { gtin, lot } = req.params;
-    
-    // 1. Lettura dei parametri della Query String (AI secondari)
-    // L'Application Identifier (AI) 17 è la data di scadenza (es. ?17=261031)
-    const expiryDate = req.query['17']; 
-    
-    // Il linkType richiesto dal client (es. app dello scanner)
-    const linkType = req.query.linkType || 'gs1:pip';
 
-    // 2. Controllo Identificativi Primari
-    if (gtin !== prodottoMock.gtin) {
-        return res.status(404).json({ error: "Prodotto non trovato nel resolver." });
+    // 1. Controllo di corrispondenza del GTIN di test
+    if (gtin !== TARGET_GTIN) {
+        return res.status(404).json({ error: "GS1 Identifiers not found on this resolver." });
     }
 
-    // 3. CONTENT NEGOTIATION (Standard GS1 1.2.0)
-    // Verifichiamo se il client accetta JSON-LD (Dati strutturati)
-    const acceptsJsonLd = req.accepts('application/ld+json');
+    // 2. Intercettazione Query Parameters
+    const linkTypeRequested = req.query.linkType; // es. gs1:recipeInfo o la versione estesa
 
-    if (acceptsJsonLd) {
-        // Creiamo una copia dell'oggetto JSON-LD di base per arricchirlo
-        const responseData = { ...prodottoMock.jsonld };
-        
-        // Dinamizziamo il JSON-LD con i dati letti dall'URI
-        responseData.lotNumber = lot;
-        if (expiryDate) {
-            responseData.encodedExpirationDate = expiryDate;
-            // Potresti usare gs1encoder qui per parsare '261031' in '2026-10-31'
-        }
+    // 3. PRIORITÀ 1: Richiesta esplicita di LINKSET (application/linkset+json)
+    if (req.accepts('application/linkset+json')) {
+        res.set('Content-Type', 'application/linkset+json');
+        return res.status(200).json(linksetResponse);
+    }
 
+    // 4. PRIORITÀ 2: Richiesta dati strutturati JSON-LD (application/ld+json)
+    if (req.accepts('application/ld+json')) {
         res.set('Content-Type', 'application/ld+json');
-        
-        // Risposta dati diretta (HTTP 200) come raccomandato per B2B/Sistemi Informatici
-        return res.status(200).json(responseData);
+        return res.status(200).json(jsonldResponse);
     }
 
-    // 4. GESTIONE REDIRECT (Standard HTTP e Browser)
-    // Se il linkType non è nel nostro database, facciamo un fallback sulla Product Information Page (PIP)
-    const redirectTarget = prodottoMock.links[linkType] || prodottoMock.links['gs1:pip'];
+    // 5. PRIORITÀ 3: Richiesta Web Standard (HTML) o qualsiasi altro client (Browser/Smartphone) -> REDIRECT
+    // Gestione dell'attributo short-name o full-URI per il linkType
+    let targetVocabKey = "https://ref.gs1.org/voc/pip"; // default fallback
 
-    // Lo standard GS1 esige un redirect HTTP 307 (Temporary Redirect).
-    // Questo evita che i browser e gli smartphone mettano in cache il redirect,
-    // garantendo che letture future con linkType diversi funzionino sempre.
-    return res.redirect(307, redirectTarget);
+    if (linkTypeRequested) {
+        if (linkTypeRequested.includes('recipeInfo') || linkTypeRequested === 'gs1:recipeInfo') {
+            targetVocabKey = "https://ref.gs1.org/voc/recipeInfo";
+        } else if (linkTypeRequested.includes('pip') || linkTypeRequested === 'gs1:pip') {
+            targetVocabKey = "https://ref.gs1.org/voc/pip";
+        }
+    }
+
+    // Estraiamo il link corrispondente dal linkset
+    const linksFound = linksetResponse.linkset[0][targetVocabKey] || linksetResponse.linkset[0]["https://ref.gs1.org/voc/defaultLink"];
+    const targetUrl = linksFound[0].href;
+
+    // Come da standard GS1 1.2.0, usiamo HTTP 307 (Temporary Redirect)
+    // valorizzando l'header 'Link' per la tracciabilità del tipo di relazione ed il Linkset correlato
+    res.set('Link', `<${targetUrl}>; rel="${targetVocabKey}"`);
+    return res.redirect(307, targetUrl);
 });
 
 // Avvio del Server
 app.listen(port, () => {
-    console.log(`✅ GS1 Resolver (Powered by gs1encoder) attivo sulla porta ${port}`);
-    console.log(`Per testare il redirect (Browser): http://localhost:${port}/01/08005360007746/10/LOTTO123?17=261031`);
-    console.log(`Per testare i Dati (JSON-LD): curl -H "Accept: application/ld+json" http://localhost:${port}/01/08005360007746/10/LOTTO123?17=261031`);
+    console.log(`🚀 GS1 Conformant Resolver attivo sulla porta ${port}`);
 });
